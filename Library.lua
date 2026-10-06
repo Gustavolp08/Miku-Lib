@@ -612,28 +612,38 @@ function Library:AddToolTip(InfoStr, HoverInstance)
 end
 
 function Library:OnHighlight(HighlightInstance, Instance, Properties, PropertiesDefault)
-    HighlightInstance.MouseEnter:Connect(function()
-        local Reg = Library.RegistryMap[Instance];
+    local HoverTweenInfo = TweenInfo.new(0.16, Enum.EasingStyle.Quint, Enum.EasingDirection.Out);
 
-        for Property, ColorIdx in next, Properties do
-            Instance[Property] = Library[ColorIdx] or ColorIdx;
+    local function Apply(TargetProperties)
+        local Reg = Library.RegistryMap[Instance];
+        local TweenProperties = {};
+
+        for Property, ColorIdx in next, TargetProperties do
+            local Value = Library[ColorIdx] or ColorIdx;
 
             if Reg and Reg.Properties[Property] then
                 Reg.Properties[Property] = ColorIdx;
             end;
+
+            local Current = Instance[Property];
+            if typeof(Current) == 'Color3' or typeof(Current) == 'number' then
+                TweenProperties[Property] = Value;
+            else
+                Instance[Property] = Value;
+            end;
         end;
+
+        if next(TweenProperties) then
+            TweenService:Create(Instance, HoverTweenInfo, TweenProperties):Play();
+        end;
+    end;
+
+    HighlightInstance.MouseEnter:Connect(function()
+        Apply(Properties);
     end)
 
     HighlightInstance.MouseLeave:Connect(function()
-        local Reg = Library.RegistryMap[Instance];
-
-        for Property, ColorIdx in next, PropertiesDefault do
-            Instance[Property] = Library[ColorIdx] or ColorIdx;
-
-            if Reg and Reg.Properties[Property] then
-                Reg.Properties[Property] = ColorIdx;
-            end;
-        end;
+        Apply(PropertiesDefault);
     end)
 end;
 
@@ -3383,6 +3393,11 @@ function Library:CreateWindow(...)
         Parent = ScreenGui;
     });
 
+    -- Subtle scale animation for a softer open/close.
+    local OuterScale = Instance.new('UIScale');
+    OuterScale.Scale = 1;
+    OuterScale.Parent = Outer;
+
     Library:MakeDraggable(Outer, 25);
 
     local HasLogo = (type(Config.Icon) == 'string' and Config.Icon ~= '');
@@ -4012,11 +4027,24 @@ function Library:CreateWindow(...)
 
         if Toggled then
             Outer.Position = BasePosition + SlideOffset;
+            OuterScale.Scale = 0.965;
         end;
 
-        TweenService:Create(Outer, TweenInfo.new(FadeTime + 0.15, Enum.EasingStyle.Quint, Enum.EasingDirection.Out), {
-            Position = Toggled and BasePosition or (BasePosition + SlideOffset);
-        }):Play();
+        TweenService:Create(
+            Outer,
+            TweenInfo.new(FadeTime + 0.15, Enum.EasingStyle.Quint, Enum.EasingDirection.Out),
+            {
+                Position = Toggled and BasePosition or (BasePosition + SlideOffset);
+            }
+        ):Play();
+
+        TweenService:Create(
+            OuterScale,
+            TweenInfo.new(FadeTime + 0.18, Enum.EasingStyle.Quint, Enum.EasingDirection.Out),
+            {
+                Scale = Toggled and 1 or 0.965;
+            }
+        ):Play();
 
         if Toggled then
             -- A bit scuffed, but if we're going from not toggled -> toggled we want to show the frame immediately so that the fade is visible.
