@@ -42,6 +42,7 @@ local Library = {
     Font = Enum.Font.GothamMedium,
 
     SkinEnabled = true;
+    AssetFolder = 'MikuLib';
     AnimateGradients = true;
     AccentGradients = setmetatable({}, { __mode = 'k' });
     GradientOwners = setmetatable({}, { __mode = 'k' });
@@ -337,6 +338,219 @@ function Library:MakeDraggable(Instance, Cutoff)
             end;
         end;
     end)
+end;
+
+-- ===== Logo / animated sprite support =====
+
+local function IsImageData(Data)
+    if type(Data) ~= 'string' or #Data < 8 then
+        return false;
+    end;
+
+    return Data:sub(2, 4) == 'PNG' or Data:sub(1, 3) == '\255\216\255';
+end;
+
+-- Accepts rbxassetid:// ids or a direct link to a PNG/JPG (downloaded once and cached in the workspace).
+function Library:GetCustomAsset(Source, Name)
+    if type(Source) ~= 'string' or Source == '' then
+        return nil;
+    end;
+
+    if Source:find('^rbxassetid://') or Source:find('^rbxasset://') or Source:find('^http://www%.roblox%.com') then
+        return Source;
+    end;
+
+    local Ok, Result = pcall(function()
+        assert(writefile and isfile and isfolder and makefolder and (getcustomasset or getsynasset),
+            'seu executor nao suporta getcustomasset/writefile');
+
+        local Folder = Library.AssetFolder;
+        if not isfolder(Folder) then
+            makefolder(Folder);
+        end;
+
+        local FileName = Name or (Source:gsub('[^%w]', '_'):sub(-80) .. '.png');
+        local Path = Folder .. '/' .. FileName;
+
+        if Library.ForceRedownload or not isfile(Path) then
+            local Data = game:HttpGet(Source);
+            assert(IsImageData(Data), 'o link nao retornou uma imagem PNG/JPG (confira o link raw)');
+            writefile(Path, Data);
+        end;
+
+        return (getcustomasset or getsynasset)(Path);
+    end);
+
+    if not Ok then
+        warn('[MikuLib] nao foi possivel carregar a imagem: ' .. tostring(Result));
+        return nil;
+    end;
+
+    return Result;
+end;
+
+--[[
+    Animated logo from a spritesheet (use tools/gif_to_spritesheet.py to turn a GIF into one).
+    Info = { Url = '...png', Columns = 8, Rows = 8, Frames = 64, FrameSize = 128, FPS = 20, Smooth = true, Round = true }
+    Smooth = true cross-fades between frames so a 20 fps GIF looks fluid at 60 fps.
+]]
+function Library:CreateSpriteLogo(Info, Parent, Size, ZIndex)
+    local Image = Library:GetCustomAsset(Info.Url or Info.Image, Info.FileName);
+    if not Image then
+        return nil;
+    end;
+
+    Size = Size or 24;
+    ZIndex = ZIndex or 5;
+
+    local Columns = math.max(1, Info.Columns or 1);
+    local Rows = math.max(1, Info.Rows or 1);
+    local Frames = math.max(1, Info.Frames or (Columns * Rows));
+    local FPS = Info.FPS or 20;
+    local FrameSize = Info.FrameSize or 128;
+
+    if type(FrameSize) == 'number' then
+        FrameSize = Vector2.new(FrameSize, FrameSize);
+    end;
+
+    local Smooth = Info.Smooth ~= false and Frames > 1;
+    local Round = Info.Round ~= false;
+
+    local function Make(Name, Z)
+        local Label = Library:Create('ImageLabel', {
+            Name = Name;
+            BackgroundTransparency = 1;
+            BorderSizePixel = 0;
+            Image = Image;
+            ImageRectSize = FrameSize;
+            ImageRectOffset = Vector2.zero;
+            Size = UDim2.fromOffset(Size, Size);
+            ZIndex = Z;
+            Parent = Parent;
+        });
+
+        local Corner = Label:FindFirstChildOfClass('UICorner');
+        if not Corner then
+            Corner = Instance.new('UICorner');
+            Corner.Parent = Label;
+        end;
+        Corner.CornerRadius = Round and UDim.new(1, 0) or UDim.new(0, 4);
+
+        return Label;
+    end;
+
+    local Current = Make('LogoFrameA', ZIndex);
+    local Next = Smooth and Make('LogoFrameB', ZIndex + 1) or nil;
+
+    local function Offset(Index)
+        Index = Index % Frames;
+        return Vector2.new((Index % Columns) * FrameSize.X, math.floor(Index / Columns) * FrameSize.Y);
+    end;
+
+    if Next then
+        Next.ImageTransparency = 1;
+    end;
+
+    local Start = os.clock();
+    local LastIndex = -1;
+    local Connection;
+
+    Connection = RenderStepped:Connect(function()
+        if not Current.Parent then
+            Connection:Disconnect();
+            return;
+        end;
+
+        if Frames <= 1 then
+            return;
+        end;
+
+        local Position = (os.clock() - Start) * FPS;
+        local Index = math.floor(Position);
+
+        if Index ~= LastIndex then
+            LastIndex = Index;
+            Current.ImageRectOffset = Offset(Index);
+
+            if Next then
+                Next.ImageRectOffset = Offset(Index + 1);
+            end;
+        end;
+
+        if Next then
+            Next.ImageTransparency = 1 - (Position - Index);
+        end;
+    end);
+
+    Library:GiveSignal(Connection);
+
+    return Current, Next;
+end;
+
+-- Splash screen: logo + title fading in/out in the middle of the screen.
+function Library:PlayIntro(LogoInfo, Title, Duration)
+    Duration = Duration or 2.2;
+
+    local Group = Instance.new('CanvasGroup');
+    Group.AnchorPoint = Vector2.new(0.5, 0.5);
+    Group.Position = UDim2.new(0.5, 0, 0.5, 10);
+    Group.Size = UDim2.fromOffset(300, 260);
+    Group.BackgroundTransparency = 1;
+    Group.GroupTransparency = 1;
+    Group.ZIndex = 300;
+    Group.Parent = ScreenGui;
+
+    if type(LogoInfo) == 'table' then
+        local Logo = Library:CreateSpriteLogo(LogoInfo, Group, 170, 301);
+        if Logo then
+            Logo.AnchorPoint = Vector2.new(0.5, 0);
+            Logo.Position = UDim2.new(0.5, 0, 0, 0);
+            local Soft = Group:FindFirstChild('LogoFrameB');
+            if Soft then
+                Soft.AnchorPoint = Vector2.new(0.5, 0);
+                Soft.Position = Logo.Position;
+            end;
+        end;
+    end;
+
+    local Text = Library:CreateLabel({
+        AnchorPoint = Vector2.new(0.5, 0);
+        Position = UDim2.new(0.5, 0, 0, 185);
+        Size = UDim2.new(1, 0, 0, 30);
+        Text = Title or 'Hatsune Miku';
+        TextSize = 24;
+        ZIndex = 301;
+        Parent = Group;
+    });
+    Text.TextColor3 = Library.AccentColor;
+
+    local Sub = Library:CreateLabel({
+        AnchorPoint = Vector2.new(0.5, 0);
+        Position = UDim2.new(0.5, 0, 0, 218);
+        Size = UDim2.new(1, 0, 0, 20);
+        Text = '♪ ♫ ♪';
+        TextSize = 16;
+        ZIndex = 301;
+        Parent = Group;
+    });
+    Sub.TextColor3 = Library.SecondaryColor;
+
+    TweenService:Create(Group, TweenInfo.new(0.6, Enum.EasingStyle.Quint, Enum.EasingDirection.Out), {
+        GroupTransparency = 0;
+        Position = UDim2.new(0.5, 0, 0.5, 0);
+    }):Play();
+
+    task.delay(Duration, function()
+        local Out = TweenService:Create(Group, TweenInfo.new(0.5, Enum.EasingStyle.Quint, Enum.EasingDirection.In), {
+            GroupTransparency = 1;
+            Position = UDim2.new(0.5, 0, 0.5, -10);
+        });
+        Out:Play();
+        Out.Completed:Wait();
+        Group:Destroy();
+    end);
+
+    return Duration + 0.5;
 end;
 
 function Library:AddToolTip(InfoStr, HoverInstance)
@@ -1497,6 +1711,37 @@ local BaseGroupbox = {};
 do
     local Funcs = {};
 
+    -- Groupbox:AddLogo({ Url = '...', Columns = 8, Rows = 8, FrameSize = 128, FPS = 20, Size = 96 })
+    function Funcs:AddLogo(Info)
+        Info = Info or {};
+
+        local Groupbox = self;
+        local Container = Groupbox.Container;
+        local Size = Info.Size or 96;
+
+        local Holder = Library:Create('Frame', {
+            BackgroundTransparency = 1;
+            Size = UDim2.new(1, 0, 0, Size + 6);
+            ZIndex = 5;
+            Parent = Container;
+        });
+
+        local Logo = Library:CreateSpriteLogo(Info, Holder, Size, 6);
+
+        if Logo then
+            local Soft = Holder:FindFirstChild('LogoFrameB');
+            for _, Img in next, { Logo, Soft } do
+                Img.AnchorPoint = Vector2.new(0.5, 0);
+                Img.Position = UDim2.new(0.5, 0, 0, 3);
+            end;
+        end;
+
+        Groupbox:AddBlank(3);
+        Groupbox:Resize();
+
+        return Logo;
+    end;
+
     function Funcs:AddBlank(Size)
         local Groupbox = self;
         local Container = Groupbox.Container;
@@ -2234,7 +2479,10 @@ do
             end
 
             local X = math.ceil(Library:MapValue(Slider.Value, Slider.Min, Slider.Max, 0, Slider.MaxSize));
-            Fill.Size = UDim2.new(0, X, 1, 0);
+            Slider.FillX = X;
+            TweenService:Create(Fill, TweenInfo.new(0.09, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
+                Size = UDim2.new(0, X, 1, 0);
+            }):Play();
 
             HideBorderRight.Visible = false;
         end;
@@ -2276,7 +2524,7 @@ do
         SliderInner.InputBegan:Connect(function(Input)
             if Input.UserInputType == Enum.UserInputType.MouseButton1 and not Library:MouseIsOverOpenedFrame() then
                 local mPos = Mouse.X;
-                local gPos = Fill.Size.X.Offset;
+                local gPos = Slider.FillX or Fill.Size.X.Offset;
                 local Diff = mPos - (Fill.AbsolutePosition.X + gPos);
 
                 while InputService:IsMouseButtonPressed(Enum.UserInputType.MouseButton1) do
@@ -2651,13 +2899,13 @@ do
         function Dropdown:OpenDropdown()
             ListOuter.Visible = true;
             Library.OpenedFrames[ListOuter] = true;
-            DropdownArrow.Rotation = 180;
+            TweenService:Create(DropdownArrow, TweenInfo.new(0.2, Enum.EasingStyle.Quint, Enum.EasingDirection.Out), { Rotation = 180 }):Play();
         end;
 
         function Dropdown:CloseDropdown()
             ListOuter.Visible = false;
             Library.OpenedFrames[ListOuter] = nil;
-            DropdownArrow.Rotation = 0;
+            TweenService:Create(DropdownArrow, TweenInfo.new(0.2, Enum.EasingStyle.Quint, Enum.EasingDirection.Out), { Rotation = 0 }):Play();
         end;
 
         function Dropdown:OnChanged(Func)
@@ -3110,7 +3358,7 @@ function Library:CreateWindow(...)
 
     if type(Config.Title) ~= 'string' then Config.Title = 'No title' end
     if type(Config.TabPadding) ~= 'number' then Config.TabPadding = 4 end
-    if type(Config.MenuFadeTime) ~= 'number' then Config.MenuFadeTime = 0.2 end
+    if type(Config.MenuFadeTime) ~= 'number' then Config.MenuFadeTime = 0.25 end
 
     if typeof(Config.Position) ~= 'UDim2' then Config.Position = UDim2.fromOffset(175, 50) end
     if typeof(Config.Size) ~= 'UDim2' then Config.Size = UDim2.fromOffset(550, 600) end
@@ -3136,6 +3384,8 @@ function Library:CreateWindow(...)
     });
 
     Library:MakeDraggable(Outer, 25);
+
+    local HasLogo = (type(Config.Icon) == 'string' and Config.Icon ~= '');
 
     do -- animated teal -> pink rim around the whole window
         local OuterCorner = Outer:FindFirstChildOfClass('UICorner');
@@ -3187,6 +3437,18 @@ function Library:CreateWindow(...)
             Library:Create('UICorner', { CornerRadius = UDim.new(1, 0); Parent = IconImage; });
         end;
 
+        -- animated GIF logo (spritesheet) in the header: Logo = { Url = '...', Columns = 8, Rows = 8, FrameSize = 128, FPS = 20 }
+        if type(Config.Logo) == 'table' then
+            local HeaderLogo = Library:CreateSpriteLogo(Config.Logo, Inner, 21, 2);
+            if HeaderLogo then
+                HasLogo = true;
+                local Soft = Inner:FindFirstChild('LogoFrameB');
+                for _, Img in next, { HeaderLogo, Soft } do
+                    Img.Position = UDim2.new(0, 7, 0, 2);
+                end;
+            end;
+        end;
+
         -- little music notes in the header, tinted with the secondary (pink) colour
         local Notes = Library:CreateLabel({
             Position = UDim2.new(1, -92, 0, 0);
@@ -3202,7 +3464,7 @@ function Library:CreateWindow(...)
     end;
 
     local WindowLabel = Library:CreateLabel({
-        Position = UDim2.new(0, (type(Config.Icon) == 'string' and Config.Icon ~= '') and 32 or 7, 0, 0);
+        Position = UDim2.new(0, HasLogo and 32 or 7, 0, 0);
         Size = UDim2.new(0, 0, 0, 25);
         Text = Config.Title or '';
         TextXAlignment = Enum.TextXAlignment.Left;
@@ -3384,6 +3646,12 @@ function Library:CreateWindow(...)
             Library.RegistryMap[TabButton].Properties.BackgroundColor3 = 'MainColor';
             Library.RegistryMap[TabButton].Properties.BorderColor3 = 'AccentColor';
             Library.RegistryMap[TabButtonLabel].Properties.TextColor3 = 'AccentColor';
+
+            TabFrame.Position = UDim2.fromOffset(0, 8);
+            TweenService:Create(TabFrame, TweenInfo.new(0.32, Enum.EasingStyle.Quint, Enum.EasingDirection.Out), {
+                Position = UDim2.fromOffset(0, 0);
+            }):Play();
+
             TabFrame.Visible = true;
         end;
 
@@ -3738,6 +4006,18 @@ function Library:CreateWindow(...)
         Toggled = (not Toggled);
         ModalElement.Modal = Toggled;
 
+        -- smooth slide + fade (TweenService runs every frame, so it stays fluid at 60 fps)
+        local BasePosition = Outer.Position;
+        local SlideOffset = UDim2.fromOffset(0, 18);
+
+        if Toggled then
+            Outer.Position = BasePosition + SlideOffset;
+        end;
+
+        TweenService:Create(Outer, TweenInfo.new(FadeTime + 0.15, Enum.EasingStyle.Quint, Enum.EasingDirection.Out), {
+            Position = Toggled and BasePosition or (BasePosition + SlideOffset);
+        }):Play();
+
         if Toggled then
             -- A bit scuffed, but if we're going from not toggled -> toggled we want to show the frame immediately so that the fade is visible.
             Outer.Visible = true;
@@ -3812,13 +4092,17 @@ function Library:CreateWindow(...)
                     continue;
                 end;
 
-                TweenService:Create(Desc, TweenInfo.new(FadeTime, Enum.EasingStyle.Linear), { [Prop] = Toggled and Cache[Prop] or 1 }):Play();
+                TweenService:Create(Desc, TweenInfo.new(FadeTime, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), { [Prop] = Toggled and Cache[Prop] or 1 }):Play();
             end;
         end;
 
-        task.wait(FadeTime);
+        task.wait(FadeTime + 0.05);
 
         Outer.Visible = Toggled;
+
+        if not Toggled then
+            Outer.Position = BasePosition;
+        end;
 
         Fading = false;
     end
@@ -3833,7 +4117,16 @@ function Library:CreateWindow(...)
         end
     end))
 
-    if Config.AutoShow then task.spawn(Library.Toggle) end
+    local IntroTime = 0;
+
+    if Config.Intro then
+        local IntroLogo = type(Config.Logo) == 'table' and Config.Logo or nil;
+        IntroTime = Library:PlayIntro(IntroLogo, type(Config.Intro) == 'string' and Config.Intro or Config.Title, type(Config.IntroTime) == 'number' and Config.IntroTime or 2.2);
+    end;
+
+    if Config.AutoShow then
+        task.delay(IntroTime, Library.Toggle);
+    end;
 
     Window.Holder = Outer;
 
