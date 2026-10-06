@@ -2,7 +2,7 @@
 -- You can suggest changes with a pull request or something
 
 -- TROQUE pelo seu repositório depois de subir estes arquivos no GitHub:
-local repo = 'https://raw.githubusercontent.com/SEU_USUARIO/MikuLib/main/'
+local repo = 'https://raw.githubusercontent.com/Gustavolp08/Miku-Lib/refs/heads/main/Library.lua/'
 
 local Library = loadstring(game:HttpGet(repo .. 'Library.lua'))()
 local ThemeManager = loadstring(game:HttpGet(repo .. 'addons/ThemeManager.lua'))()
