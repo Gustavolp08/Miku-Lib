@@ -21,7 +21,23 @@ local ThemeManager = {} do
 		['Quartz'] = { 14, httpService:JSONDecode('{"FontColor":"ffffff","MainColor":"232330","AccentColor":"426e87","BackgroundColor":"1d1b26","OutlineColor":"27232f","SecondaryColor":"78b7d6"}') },
 	}
 
+	-- Only these keys are ever read from a theme. Custom themes are user-editable JSON files, and the old code
+	-- wrote every key it found straight into the Library table (a key like "Registry" would break the whole UI).
+	local THEME_FIELDS = { "FontColor", "MainColor", "AccentColor", "SecondaryColor", "BackgroundColor", "OutlineColor" }
+
+	-- Accepts "rrggbb" or "#rrggbb" and returns nil instead of throwing on garbage.
+	local function ParseColor(col)
+		if type(col) ~= 'string' then
+			return nil
+		end
+
+		local ok, color = pcall(Color3.fromHex, col)
+		return ok and color or nil
+	end
+
 	function ThemeManager:ApplyTheme(theme)
+		if type(theme) ~= 'string' or theme == '' then return end
+
 		local customThemeData = self:GetCustomTheme(theme)
 		local data = customThemeData or self.BuiltInThemes[theme]
 
@@ -29,21 +45,34 @@ local ThemeManager = {} do
 
 		-- custom themes are just regular dictionaries instead of an array with { index, dictionary }
 
-		local scheme = data[2]
-		for idx, col in next, customThemeData or scheme do
-			self.Library[idx] = Color3.fromHex(col)
-			
-			if Options[idx] then
-				Options[idx]:SetValueRGB(Color3.fromHex(col))
+		local scheme = customThemeData or data[2]
+
+		-- Setting each picker fires its OnChanged -> ThemeUpdate, which re-skins the whole registry.
+		-- Doing that 6 times per theme switch is wasteful, so updates are held back and run once at the end.
+		self.Applying = true
+
+		for _, idx in next, THEME_FIELDS do
+			local color = ParseColor(scheme[idx])
+
+			if color then
+				self.Library[idx] = color
+
+				if Options[idx] then
+					Options[idx]:SetValueRGB(color)
+				end
 			end
 		end
+
+		self.Applying = false
 
 		self:ThemeUpdate()
 	end
 
 	function ThemeManager:ThemeUpdate()
+		if self.Applying then return end
+
 		-- This allows us to force apply themes without loading the themes tab :)
-		local options = { "FontColor", "MainColor", "AccentColor", "SecondaryColor", "BackgroundColor", "OutlineColor" }
+		local options = THEME_FIELDS
 		for i, field in next, options do
 			if Options and Options[field] then
 				self.Library[field] = Options[field].Value
@@ -113,13 +142,21 @@ local ThemeManager = {} do
 		groupbox:AddDropdown('ThemeManager_CustomThemeList', { Text = 'Custom themes', Values = self:ReloadCustomThemes(), AllowNull = true, Default = 1 })
 		groupbox:AddDivider()
 		
-		groupbox:AddButton('Save theme', function() 
-			self:SaveCustomTheme(Options.ThemeManager_CustomThemeName.Value)
+		groupbox:AddButton('Save theme', function()
+			if not self:SaveCustomTheme(Options.ThemeManager_CustomThemeName.Value) then
+				return
+			end
 
 			Options.ThemeManager_CustomThemeList:SetValues(self:ReloadCustomThemes())
 			Options.ThemeManager_CustomThemeList:SetValue(nil)
-		end):AddButton('Load theme', function() 
-			self:ApplyTheme(Options.ThemeManager_CustomThemeList.Value) 
+		end):AddButton('Load theme', function()
+			local name = Options.ThemeManager_CustomThemeList.Value
+
+			if not name or name == '' then
+				return self.Library:Notify('Select a custom theme first', 2)
+			end
+
+			self:ApplyTheme(name)
 		end)
 
 		groupbox:AddButton('Refresh list', function()
@@ -148,7 +185,24 @@ local ThemeManager = {} do
 		Options.FontColor:OnChanged(UpdateTheme)
 	end
 
+	-- Theme names end up in file paths: drop path separators / illegal characters so "../x" can't escape the folder.
+	local function SanitizeFileName(file)
+		if type(file) ~= 'string' then
+			return nil
+		end
+
+		file = file:gsub('[%c<>:"/\\|%?%*]', ''):gsub('^%s+', ''):gsub('%s+$', '')
+		file = file:gsub('^%.+', '')
+
+		return file ~= '' and file or nil
+	end
+
 	function ThemeManager:GetCustomTheme(file)
+		file = SanitizeFileName(file)
+		if not file then
+			return nil
+		end
+
 		local path = self.Folder .. '/themes/' .. file
 		if not isfile(path) then
 			return nil
@@ -156,27 +210,38 @@ local ThemeManager = {} do
 
 		local data = readfile(path)
 		local success, decoded = pcall(httpService.JSONDecode, httpService, data)
-		
-		if not success then
+
+		if not success or type(decoded) ~= 'table' then
 			return nil
 		end
 
 		return decoded
 	end
 
+	-- Returns true when the theme was written, so callers know whether to refresh their lists.
 	function ThemeManager:SaveCustomTheme(file)
-		if file:gsub(' ', '') == '' then
-			return self.Library:Notify('Invalid file name for theme (empty)', 3)
+		local name = SanitizeFileName(file)
+
+		if not name then
+			self.Library:Notify('Invalid file name for theme (empty)', 3)
+			return false
 		end
 
 		local theme = {}
-		local fields = { "FontColor", "MainColor", "AccentColor", "SecondaryColor", "BackgroundColor", "OutlineColor" }
 
-		for _, field in next, fields do
+		for _, field in next, THEME_FIELDS do
 			theme[field] = Options[field].Value:ToHex()
 		end
 
-		writefile(self.Folder .. '/themes/' .. file .. '.json', httpService:JSONEncode(theme))
+		local ok, err = pcall(writefile, self.Folder .. '/themes/' .. name .. '.json', httpService:JSONEncode(theme))
+
+		if not ok then
+			self.Library:Notify('Failed to save theme: ' .. tostring(err), 3)
+			return false
+		end
+
+		self.Library:Notify(string.format('Saved theme %q', name), 2)
+		return true
 	end
 
 	function ThemeManager:ReloadCustomThemes()
@@ -184,23 +249,15 @@ local ThemeManager = {} do
 
 		local out = {}
 		for i = 1, #list do
-			local file = list[i]
-			if file:sub(-5) == '.json' then
-				-- i hate this but it has to be done ...
+			-- file name (with extension) after the last / or \ separator
+			local name = list[i]:match('([^/\\]+%.json)$')
 
-				local pos = file:find('.json', 1, true)
-				local char = file:sub(pos, pos)
-
-				while char ~= '/' and char ~= '\\' and char ~= '' do
-					pos = pos - 1
-					char = file:sub(pos, pos)
-				end
-
-				if char == '/' or char == '\\' then
-					table.insert(out, file:sub(pos + 1))
-				end
+			if name then
+				table.insert(out, name)
 			end
 		end
+
+		table.sort(out)
 
 		return out
 	end
