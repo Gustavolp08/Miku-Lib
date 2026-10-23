@@ -6,16 +6,39 @@ local Players = game:GetService('Players');
 local RunService = game:GetService('RunService')
 local TweenService = game:GetService('TweenService');
 local RenderStepped = RunService.RenderStepped;
-local LocalPlayer = Players.LocalPlayer;
+local LocalPlayer = Players.LocalPlayer or (function()
+    Players:GetPropertyChangedSignal('LocalPlayer'):Wait();
+    return Players.LocalPlayer;
+end)();
 local Mouse = LocalPlayer:GetMouse();
+
+-- Re-executing the script would stack a second menu on top of the first one,
+-- so the previous instance is unloaded first (set getgenv().MikuLibKeepOldInstance = true to opt out).
+do
+    local Env = getgenv();
+    local Old = Env.Library;
+
+    if Old and not Env.MikuLibKeepOldInstance and type(Old.Unload) == 'function' and not Old.Unloaded then
+        pcall(Old.Unload, Old);
+    end;
+end;
 
 local ProtectGui = protectgui or (syn and syn.protect_gui) or (function() end);
 
 local ScreenGui = Instance.new('ScreenGui');
+ScreenGui.Name = 'MikuLib';
 ProtectGui(ScreenGui);
 
 ScreenGui.ZIndexBehavior = Enum.ZIndexBehavior.Global;
-ScreenGui.Parent = CoreGui;
+
+-- gethui() is hidden from game scripts and is safer than CoreGui when the executor offers it.
+do
+    local Ok, Hui = pcall(function()
+        return gethui and gethui();
+    end);
+
+    ScreenGui.Parent = (Ok and typeof(Hui) == 'Instance') and Hui or CoreGui;
+end;
 
 local Toggles = {};
 local Options = {};
@@ -51,6 +74,8 @@ local Library = {
     DependencyBoxes = {};
 
     Signals = {};
+    UnloadCallbacks = {};
+    Unloaded = false;
     ScreenGui = ScreenGui;
 };
 
@@ -126,6 +151,8 @@ function Library:SafeCallback(f, ...)
     local success, event = pcall(f, ...);
 
     if not success then
+        event = tostring(event);
+
         local _, i = event:find(":%d+: ");
 
         if not i then
@@ -676,7 +703,12 @@ function Library:UpdateDependencyBoxes()
 end;
 
 function Library:MapValue(Value, MinA, MaxA, MinB, MaxB)
-    return (1 - ((Value - MinA) / (MaxA - MinA))) * MinB + ((Value - MinA) / (MaxA - MinA)) * MaxB;
+    if MaxA == MinA then
+        return MinB; -- avoids a 0/0 (NaN) when a slider has Min == Max
+    end;
+
+    local Alpha = (Value - MinA) / (MaxA - MinA);
+    return (1 - Alpha) * MinB + Alpha * MaxB;
 end;
 
 function Library:GetTextBounds(Text, Font, Size, Resolution)
@@ -707,25 +739,38 @@ function Library:AddToRegistry(Instance, Properties, IsHud)
     Library.RegistryMap[Instance] = Data;
 
     if IsHud then
+        Data.HudIdx = #Library.HudRegistry + 1;
         table.insert(Library.HudRegistry, Data);
     end;
+end;
+
+-- O(1) removal (swap with the last entry). The old version scanned the whole registry for every
+-- destroyed instance, which made rebuilding big dropdowns quadratic.
+local function SwapRemove(List, Key, Data)
+    local Idx = Data[Key];
+
+    if not Idx or List[Idx] ~= Data then
+        return;
+    end;
+
+    local Last = #List;
+
+    if Idx ~= Last then
+        local Moved = List[Last];
+        List[Idx] = Moved;
+        Moved[Key] = Idx;
+    end;
+
+    List[Last] = nil;
+    Data[Key] = nil;
 end;
 
 function Library:RemoveFromRegistry(Instance)
     local Data = Library.RegistryMap[Instance];
 
     if Data then
-        for Idx = #Library.Registry, 1, -1 do
-            if Library.Registry[Idx] == Data then
-                table.remove(Library.Registry, Idx);
-            end;
-        end;
-
-        for Idx = #Library.HudRegistry, 1, -1 do
-            if Library.HudRegistry[Idx] == Data then
-                table.remove(Library.HudRegistry, Idx);
-            end;
-        end;
+        SwapRemove(Library.Registry, 'Idx', Data);
+        SwapRemove(Library.HudRegistry, 'HudIdx', Data);
 
         Library.RegistryMap[Instance] = nil;
     end;
@@ -742,7 +787,9 @@ function Library:UpdateColorsUsingRegistry()
 
     -- The above would be especially efficient for a rainbow menu color or live color-changing.
 
-    for Idx, Object in next, Library.Registry do
+    for Idx = 1, #Library.Registry do
+        local Object = Library.Registry[Idx];
+
         for Property, ColorIdx in next, Object.Properties do
             if type(ColorIdx) == 'string' then
                 Object.Instance[Property] = Library[ColorIdx];
@@ -763,22 +810,35 @@ function Library:GiveSignal(Signal)
 end
 
 function Library:Unload()
+    if Library.Unloaded then
+        return;
+    end;
+
+    Library.Unloaded = true;
+
     -- Unload all of the signals
     for Idx = #Library.Signals, 1, -1 do
         local Connection = table.remove(Library.Signals, Idx)
-        Connection:Disconnect()
+        pcall(Connection.Disconnect, Connection)
     end
 
-     -- Call our unload callback, maybe to undo some hooks etc
-    if Library.OnUnload then
-        Library.OnUnload()
-    end
+    -- Call the unload callbacks, maybe to undo some hooks etc. One failing callback must not stop the rest.
+    for _, Callback in next, Library.UnloadCallbacks do
+        local Ok, Err = pcall(Callback);
+
+        if not Ok then
+            warn('[MikuLib] OnUnload callback failed: ' .. tostring(Err));
+        end;
+    end;
 
     ScreenGui:Destroy()
 end
 
+-- Can be called more than once: every callback is kept (the old version overwrote Library.OnUnload itself).
 function Library:OnUnload(Callback)
-    Library.OnUnload = Callback
+    if type(Callback) == 'function' then
+        table.insert(Library.UnloadCallbacks, Callback);
+    end;
 end
 
 Library:GiveSignal(ScreenGui.DescendantRemoving:Connect(function(Instance)
@@ -1212,7 +1272,11 @@ do
             if enter then
                 local r, g, b = RgbBox.Text:match('(%d+),%s*(%d+),%s*(%d+)')
                 if r and g and b then
-                    ColorPicker.Hue, ColorPicker.Sat, ColorPicker.Vib = Color3.toHSV(Color3.fromRGB(r, g, b))
+                    ColorPicker.Hue, ColorPicker.Sat, ColorPicker.Vib = Color3.toHSV(Color3.fromRGB(
+                        math.clamp(tonumber(r), 0, 255),
+                        math.clamp(tonumber(g), 0, 255),
+                        math.clamp(tonumber(b), 0, 255)
+                    ))
                 end
             end
 
@@ -1571,7 +1635,12 @@ do
                     return Key == 'MB1' and InputService:IsMouseButtonPressed(Enum.UserInputType.MouseButton1)
                         or Key == 'MB2' and InputService:IsMouseButtonPressed(Enum.UserInputType.MouseButton2);
                 else
-                    return InputService:IsKeyDown(Enum.KeyCode[KeyPicker.Value]);
+                    -- a stale/invalid key name (e.g. from an old config) must not throw every frame
+                    local Ok, KeyCode = pcall(function()
+                        return Enum.KeyCode[Key];
+                    end);
+
+                    return Ok and KeyCode ~= nil and InputService:IsKeyDown(KeyCode);
                 end;
             else
                 return KeyPicker.Toggled;
@@ -1580,9 +1649,19 @@ do
 
         function KeyPicker:SetValue(Data)
             local Key, Mode = Data[1], Data[2];
+
+            if type(Key) ~= 'string' then
+                return;
+            end;
+
             DisplayLabel.Text = Key;
             KeyPicker.Value = Key;
-            ModeButtons[Mode]:Select();
+
+            -- an unknown mode (hand-edited config, mode not allowed by Info.Modes) keeps the current one
+            if ModeButtons[Mode] then
+                ModeButtons[Mode]:Select();
+            end;
+
             KeyPicker:Update();
         end;
 
@@ -1612,6 +1691,11 @@ do
 
         PickOuter.InputBegan:Connect(function(Input)
             if Input.UserInputType == Enum.UserInputType.MouseButton1 and not Library:MouseIsOverOpenedFrame() then
+                -- a second click while already waiting for a key used to start a second listener
+                if Picking then
+                    return;
+                end;
+
                 Picking = true;
 
                 DisplayLabel.Text = '';
@@ -1646,6 +1730,16 @@ do
                         Key = 'MB2';
                     end;
 
+                    -- gamepad / touch / etc. inputs have no key name: keep listening instead of erroring
+                    if not Key then
+                        return;
+                    end;
+
+                    -- Escape unbinds the key
+                    if Key == 'Escape' then
+                        Key = 'None';
+                    end;
+
                     Break = true;
                     Picking = false;
 
@@ -1666,7 +1760,8 @@ do
 
         Library:GiveSignal(InputService.InputBegan:Connect(function(Input)
             if (not Picking) then
-                if KeyPicker.Mode == 'Toggle' then
+                -- don't fire binds while the user is typing in a textbox
+                if KeyPicker.Mode == 'Toggle' and not InputService:GetFocusedTextBox() then
                     local Key = KeyPicker.Value;
 
                     if Key == 'MB1' or Key == 'MB2' then
@@ -1903,10 +1998,16 @@ do
                     end
                 end)
                 task.delay(timeout, function()
-                    connection:disconnect()
+                    connection:Disconnect()
                     bindable:Fire(false)
                 end)
-                return bindable.Event:Wait()
+
+                local Result = bindable.Event:Wait()
+
+                -- the BindableEvent used to leak one instance per double-click
+                bindable:Destroy()
+
+                return Result
             end
 
             local function ValidateClick(Input)
@@ -1965,6 +2066,11 @@ do
             return self
         end
 
+        function Button:SetText(Text)
+            self.Text = Text;
+            self.Label.Text = Text;
+        end
+
 
         function Button:AddButton(...)
             local SubButton = {}
@@ -1984,6 +2090,11 @@ do
                     Library:AddToolTip(tooltip, self.Outer)
                 end
                 return SubButton
+            end
+
+            function SubButton:SetText(Text)
+                self.Text = Text;
+                self.Label.Text = Text;
             end
 
             if type(SubButton.Tooltip) == 'string' then
@@ -2229,7 +2340,7 @@ do
     end;
 
     function Funcs:AddToggle(Idx, Info)
-        assert(Info.Text, 'AddInput: Missing `Text` string.')
+        assert(Info.Text, 'AddToggle: Missing `Text` string.')
 
         local Toggle = {
             Value = Info.Default or false;
@@ -2522,7 +2633,8 @@ do
                 return;
             end;
 
-            Num = math.clamp(Num, Slider.Min, Slider.Max);
+            -- clamp then round, so values coming from configs / scripts obey Rounding like dragging does
+            Num = Round(math.clamp(Num, Slider.Min, Slider.Max));
 
             Slider.Value = Num;
             Slider:Display();
@@ -2665,11 +2777,12 @@ do
 
         local ItemList = Library:CreateLabel({
             Position = UDim2.new(0, 5, 0, 0);
-            Size = UDim2.new(1, -5, 1, 0);
+            Size = UDim2.new(1, -22, 1, 0);
             TextSize = 14;
             Text = '--';
             TextXAlignment = Enum.TextXAlignment.Left;
-            TextWrapped = true;
+            TextWrapped = false;
+            TextTruncate = Enum.TextTruncate.AtEnd; -- long multi-selections used to wrap and spill out of the box
             ZIndex = 7;
             Parent = DropdownInner;
         });
@@ -2880,6 +2993,7 @@ do
 
                             Library:SafeCallback(Dropdown.Callback, Dropdown.Value);
                             Library:SafeCallback(Dropdown.Changed, Dropdown.Value);
+                            Library:UpdateDependencyBoxes();
 
                             Library:AttemptSave();
                         end;
@@ -2887,10 +3001,11 @@ do
                 end);
 
                 Table:UpdateButton();
-                Dropdown:Display();
 
                 Buttons[Button] = Table;
             end;
+
+            Dropdown:Display();
 
             Scrolling.CanvasSize = UDim2.fromOffset(0, (Count * 20) + 1);
 
@@ -2927,7 +3042,7 @@ do
             if Dropdown.Multi then
                 local nTable = {};
 
-                for Value, Bool in next, Val do
+                for Value, Bool in next, (type(Val) == 'table' and Val or {}) do
                     if table.find(Dropdown.Values, Value) then
                         nTable[Value] = true
                     end;
@@ -2946,6 +3061,7 @@ do
 
             Library:SafeCallback(Dropdown.Callback, Dropdown.Value);
             Library:SafeCallback(Dropdown.Changed, Dropdown.Value);
+            Library:UpdateDependencyBoxes();
         end;
 
         DropdownOuter.InputBegan:Connect(function(Input)
@@ -2958,7 +3074,7 @@ do
             end;
         end);
 
-        InputService.InputBegan:Connect(function(Input)
+        Library:GiveSignal(InputService.InputBegan:Connect(function(Input)
             if Input.UserInputType == Enum.UserInputType.MouseButton1 then
                 local AbsPos, AbsSize = ListOuter.AbsolutePosition, ListOuter.AbsoluteSize;
 
@@ -2968,7 +3084,7 @@ do
                     Dropdown:CloseDropdown();
                 end;
             end;
-        end);
+        end));
 
         Dropdown:BuildDropdownList();
         Dropdown:Display();
@@ -3061,7 +3177,10 @@ do
                 local Elem = Dependency[1];
                 local Value = Dependency[2];
 
-                if Elem.Type == 'Toggle' and Elem.Value ~= Value then
+                -- Toggles and single-select dropdowns can drive a dependency box.
+                local Supported = Elem.Type == 'Toggle' or (Elem.Type == 'Dropdown' and not Elem.Multi);
+
+                if Supported and Elem.Value ~= Value then
                     Holder.Visible = false;
                     Depbox:Resize();
                     return;
@@ -3262,6 +3381,8 @@ function Library:SetWatermark(Text)
 end;
 
 function Library:Notify(Text, Time)
+    Text = tostring(Text);
+
     local XSize, YSize = Library:GetTextBounds(Text, Library.Font, 14);
 
     Time = Time or 5;
@@ -3359,8 +3480,9 @@ function Library:CreateWindow(...)
     local Arguments = { ... }
     local Config = { AnchorPoint = Vector2.zero }
 
-    if type(...) == 'table' then
-        Config = ...;
+    -- type(...) with no arguments throws, so Library:CreateWindow() used to error out.
+    if type(Arguments[1]) == 'table' then
+        Config = Arguments[1];
     else
         Config.Title = Arguments[1]
         Config.AutoShow = Arguments[2] or false;
@@ -3602,11 +3724,13 @@ function Library:CreateWindow(...)
             Parent = TabContainer;
         });
 
+        -- Height follows the window (-18 gives the old fixed 509px at the default 600px window),
+        -- so a custom Config.Size no longer leaves dead space or clips the content.
         local LeftSide = Library:Create('ScrollingFrame', {
             BackgroundTransparency = 1;
             BorderSizePixel = 0;
             Position = UDim2.new(0, 8 - 1, 0, 8 - 1);
-            Size = UDim2.new(0.5, -12 + 2, 0, 507 + 2);
+            Size = UDim2.new(0.5, -12 + 2, 1, -18);
             CanvasSize = UDim2.new(0, 0, 0, 0);
             BottomImage = '';
             TopImage = '';
@@ -3619,7 +3743,7 @@ function Library:CreateWindow(...)
             BackgroundTransparency = 1;
             BorderSizePixel = 0;
             Position = UDim2.new(0.5, 4 + 1, 0, 8 - 1);
-            Size = UDim2.new(0.5, -12 + 2, 0, 507 + 2);
+            Size = UDim2.new(0.5, -12 + 2, 1, -18);
             CanvasSize = UDim2.new(0, 0, 0, 0);
             BottomImage = '';
             TopImage = '';
@@ -4051,6 +4175,11 @@ function Library:CreateWindow(...)
             Outer.Visible = true;
 
             task.spawn(function()
+                -- executors without the Drawing API just keep the normal cursor instead of erroring
+                if not Drawing then
+                    return;
+                end;
+
                 -- TODO: add cursor fade?
                 local State = InputService.MouseIconEnabled;
 
@@ -4136,6 +4265,11 @@ function Library:CreateWindow(...)
     end
 
     Library:GiveSignal(InputService.InputBegan:Connect(function(Input, Processed)
+        -- typing the menu key into a textbox must not open/close the menu
+        if InputService:GetFocusedTextBox() then
+            return;
+        end;
+
         if type(Library.ToggleKeybind) == 'table' and Library.ToggleKeybind.Type == 'KeyPicker' then
             if Input.UserInputType == Enum.UserInputType.Keyboard and Input.KeyCode.Name == Library.ToggleKeybind.Value then
                 task.spawn(Library.Toggle)
@@ -4171,8 +4305,12 @@ local function OnPlayerChange()
     end;
 end;
 
-Players.PlayerAdded:Connect(OnPlayerChange);
-Players.PlayerRemoving:Connect(OnPlayerChange);
+-- Given to the signal list so they are disconnected on Unload (they used to leak and keep touching dead dropdowns).
+Library:GiveSignal(Players.PlayerAdded:Connect(OnPlayerChange));
+Library:GiveSignal(Players.PlayerRemoving:Connect(function()
+    -- PlayerRemoving fires before the player has left the list
+    task.defer(OnPlayerChange);
+end));
 
 getgenv().Library = Library
 return Library
