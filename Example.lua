@@ -1,12 +1,13 @@
 -- New example script written by wally
 -- You can suggest changes with a pull request or something
 
--- TROQUE pelo seu repositório depois de subir estes arquivos no GitHub:
-local repo = 'https://raw.githubusercontent.com/Gustavolp08/Miku-Lib/refs/heads/main/Library.lua/'
+-- The three files live at the root of the repository (the old URL ended in "Library.lua/" and pointed
+-- to an "addons/" folder that does not exist, so none of the loadstring calls could work).
+local repo = 'https://raw.githubusercontent.com/Gustavolp08/Miku-Lib/main/'
 
 local Library = loadstring(game:HttpGet(repo .. 'Library.lua'))()
-local ThemeManager = loadstring(game:HttpGet(repo .. 'addons/ThemeManager.lua'))()
-local SaveManager = loadstring(game:HttpGet(repo .. 'addons/SaveManager.lua'))()
+local ThemeManager = loadstring(game:HttpGet(repo .. 'ThemeManager.lua'))()
+local SaveManager = loadstring(game:HttpGet(repo .. 'SaveManager.lua'))()
 
 local Window = Library:CreateWindow({
     -- Set Center to true if you want the menu to appear in the center
@@ -376,6 +377,16 @@ SubDepbox:AddDropdown('DepboxDropdown', { Text = 'Dropdown', Default = 1, Values
 
 Depbox:SetupDependencies({
     { Toggles.ControlToggle, true } -- We can also pass `false` if we only want our features to show when the toggle is off!
+});
+
+-- Single-select dropdowns can drive a dependency box too: the box is only shown while the dropdown holds that value.
+RightGroupbox:AddDropdown('ModeDropdown', { Text = 'Mode', Default = 'Simple', Values = { 'Simple', 'Advanced' } });
+
+local AdvancedBox = RightGroupbox:AddDependencyBox();
+AdvancedBox:AddSlider('AdvancedSlider', { Text = 'Advanced option', Default = 5, Min = 0, Max = 10, Rounding = 1 });
+
+AdvancedBox:SetupDependencies({
+    { Options.ModeDropdown, 'Advanced' }
 });
 
 SubDepbox:SetupDependencies({
