@@ -67,8 +67,11 @@ local Library = {
     SkinEnabled = true;
     AssetFolder = 'MikuLib';
     AnimateGradients = true;
-    AccentGradients = setmetatable({}, { __mode = 'k' });
+    AccentGradients = setmetatable({}, { __mode = 'k' }); -- [UIGradient] = 'Bar' | 'Rim' | 'Title'
     GradientOwners = setmetatable({}, { __mode = 'k' });
+    Corners = setmetatable({}, { __mode = 'k' });        -- [UICorner] = 'Window' | 'WindowInner' | 'Large' | 'Small'
+    RimStrokes = setmetatable({}, { __mode = 'k' });
+    GlowStrokes = setmetatable({}, { __mode = 'k' });
 
     OpenedFrames = {};
     DependencyBoxes = {};
@@ -78,6 +81,100 @@ local Library = {
     Unloaded = false;
     ScreenGui = ScreenGui;
 };
+
+--[[
+    ===== STYLE =====
+    Everything visual that is not a colour lives here, so the whole look can be tuned without touching the library:
+
+        Library:SetStyle({ GradientSpeed = 2, WindowCorner = 4, GlowEnabled = false })   -- live, any time
+        Library:CreateWindow({ Style = { ... } })                                        -- or when creating the window
+        Library:ApplyStylePreset('Cyber')                                                -- Miku | Cyber | Soft | Minimal
+        Library:ResetStyle()
+
+    Animation
+        Animations        boolean   master switch for every tween (false = instant)
+        AnimationSpeed    number    1 = normal, 2 = twice as fast, 0 = instant
+        TweenTime         number    base duration (seconds) of hover / toggle / tab tweens
+        EasingStyle       Enum.EasingStyle
+        EasingDirection   Enum.EasingDirection
+    Moving gradient ("the fade")
+        GradientAnimated  boolean   animate the accent bars / slider fill / title
+        GradientMode      string    'Sway' (slides side to side) | 'Rotate' | 'Static'
+        GradientSpeed     number    speed multiplier for the gradient animation
+        GradientSway      number    how far 'Sway' travels (0 - 1)
+        GradientColors    table?    list of Color3 or theme keys ('AccentColor'), 2+ entries. nil = accent / secondary / accent
+        RimMode           string    same as GradientMode but for the window border
+        RimThickness      number    window border thickness in pixels
+    Glow / effects
+        GlowEnabled       boolean   soft pulsing halo around the window
+        GlowThickness     number
+        GlowTransparency  number    0 (solid) - 1 (invisible), resting value
+        GlowPulse         number    how much the halo breathes
+        GlowSpeed         number
+        ShineEnabled      boolean   light sweep across the title bar
+        ShineInterval     number    seconds between sweeps
+        TitleGradient     boolean   animated gradient on the title text (read when the window is created)
+    Shape / text
+        WindowCorner      number    corner radius of the window
+        ElementCorner     number    corner radius of big elements (groupboxes, lists...)
+        SmallCorner       number    corner radius of controls (buttons, toggles, inputs...)
+        Font              Enum.Font
+]]
+Library.DefaultStyle = {
+    Animations = true;
+    AnimationSpeed = 1;
+    TweenTime = 0.18;
+    EasingStyle = Enum.EasingStyle.Quint;
+    EasingDirection = Enum.EasingDirection.Out;
+
+    GradientAnimated = true;
+    GradientMode = 'Sway';
+    GradientSpeed = 1;
+    GradientSway = 0.7;
+    GradientColors = nil;
+    RimMode = 'Rotate';
+    RimThickness = 2;
+
+    GlowEnabled = true;
+    GlowThickness = 9;
+    GlowTransparency = 0.82;
+    GlowPulse = 0.09;
+    GlowSpeed = 1.6;
+    ShineEnabled = true;
+    ShineInterval = 5;
+    TitleGradient = true;
+
+    WindowCorner = 12;
+    ElementCorner = 6;
+    SmallCorner = 4;
+    Font = Enum.Font.GothamMedium;
+};
+
+Library.StylePresets = {
+    Miku = {};
+    Cyber = {
+        WindowCorner = 2; ElementCorner = 2; SmallCorner = 1;
+        GradientSpeed = 2.2; GlowThickness = 12; GlowTransparency = 0.75; GlowPulse = 0.14; GlowSpeed = 2.6;
+        ShineInterval = 3; AnimationSpeed = 1.3;
+    };
+    Soft = {
+        WindowCorner = 16; ElementCorner = 9; SmallCorner = 6;
+        GradientSpeed = 0.5; GlowThickness = 7; GlowTransparency = 0.88; AnimationSpeed = 0.85; TweenTime = 0.24;
+    };
+    Minimal = {
+        GlowEnabled = false; ShineEnabled = false; GradientAnimated = false; TitleGradient = false;
+        RimThickness = 1; WindowCorner = 6; ElementCorner = 4; SmallCorner = 3; AnimationSpeed = 1.5;
+    };
+};
+
+Library.Style = {};
+for Key, Value in next, Library.DefaultStyle do
+    Library.Style[Key] = Value;
+end;
+
+-- 0..1 multiplier for the glow while the menu fades in / out (tweened in Library:Toggle)
+local GlowAlpha = Instance.new('NumberValue');
+GlowAlpha.Value = 0;
 
 local RainbowStep = 0
 local Hue = 0
@@ -99,18 +196,46 @@ table.insert(Library.Signals, RenderStepped:Connect(function(Delta)
     end
 end))
 
+-- Drives the moving gradients ("the fade") and the pulsing glow. One connection for everything.
 local GradientClock = 0;
+local GlowClock = 0;
 table.insert(Library.Signals, RenderStepped:Connect(function(Delta)
-    if not Library.AnimateGradients then
+    local Style = Library.Style;
+
+    if Style.GlowEnabled then
+        GlowClock = GlowClock + Delta * Style.GlowSpeed;
+
+        local Transparency = Style.GlowTransparency + math.sin(GlowClock) * Style.GlowPulse;
+        -- GlowAlpha fades the halo in / out together with the menu
+        Transparency = 1 - (1 - math.clamp(Transparency, 0, 1)) * GlowAlpha.Value;
+
+        for Stroke in next, Library.GlowStrokes do
+            if Stroke.Parent then
+                Stroke.Transparency = Transparency;
+            end;
+        end;
+    end;
+
+    if not Library.AnimateGradients or not Style.GradientAnimated then
         return;
     end;
 
-    GradientClock = GradientClock + Delta;
-    local Offset = Vector2.new(math.sin(GradientClock * 0.9) * 0.5, 0);
+    GradientClock = GradientClock + Delta * Style.GradientSpeed;
 
-    for Gradient in next, Library.AccentGradients do
+    local BarOffset = Vector2.new(math.sin(GradientClock * 0.9) * Style.GradientSway, 0);
+    local BarRotation = (GradientClock * 45) % 360;
+    local RimRotation = (GradientClock * 60) % 360;
+
+    for Gradient, Kind in next, Library.AccentGradients do
         if Gradient.Parent then
-            Gradient.Offset = Offset;
+            local IsRim = Kind == 'Rim';
+            local Mode = IsRim and Style.RimMode or Style.GradientMode;
+
+            if Mode == 'Sway' then
+                Gradient.Offset = BarOffset;
+            elseif Mode == 'Rotate' then
+                Gradient.Rotation = IsRim and RimRotation or BarRotation;
+            end;
         end;
     end;
 end))
@@ -200,7 +325,27 @@ local function IsBlack(Color)
     return Color.R == 0 and Color.G == 0 and Color.B == 0;
 end;
 
+-- Colours come from Style.GradientColors (Color3 values or theme keys like 'AccentColor'), so a theme change
+-- re-colours the gradient too. Default: accent -> secondary -> accent (loops cleanly).
 function Library:GetAccentSequence()
+    local List = Library.Style.GradientColors;
+
+    if type(List) == 'table' and #List >= 2 then
+        local Keypoints = {};
+
+        for Idx, Entry in next, List do
+            local Color = type(Entry) == 'string' and Library[Entry] or Entry;
+
+            if typeof(Color) ~= 'Color3' then
+                Color = Library.AccentColor;
+            end;
+
+            table.insert(Keypoints, ColorSequenceKeypoint.new((Idx - 1) / (#List - 1), Color));
+        end;
+
+        return ColorSequence.new(Keypoints);
+    end;
+
     return ColorSequence.new({
         ColorSequenceKeypoint.new(0, Library.AccentColor),
         ColorSequenceKeypoint.new(0.5, Library.SecondaryColor),
@@ -208,9 +353,10 @@ function Library:GetAccentSequence()
     });
 end;
 
--- Turns a Frame / UIStroke into an animated teal -> pink gradient that follows the theme.
-function Library:ApplyAccentGradient(Target)
-    if Target:IsA('GuiObject') then
+-- Turns a Frame / UIStroke / TextLabel into an animated teal -> pink gradient that follows the theme.
+-- Kind: 'Bar' (default), 'Rim' (window border, uses Style.RimMode) or 'Title'.
+function Library:ApplyAccentGradient(Target, Kind)
+    if Target:IsA('GuiObject') and not Target:IsA('TextLabel') then
         Target.BackgroundColor3 = Color3.new(1, 1, 1);
         Library.GradientOwners[Target] = true;
     end;
@@ -218,12 +364,35 @@ function Library:ApplyAccentGradient(Target)
     local Gradient = Instance.new('UIGradient');
     Gradient.Color = Library:GetAccentSequence();
     Gradient.Parent = Target;
-    Library.AccentGradients[Gradient] = true;
+    Library.AccentGradients[Gradient] = Kind or 'Bar';
 
     return Gradient;
 end;
 
-function Library:SyncStroke(Inst, Stroke, Animate)
+-- One place for every tween, so Style.Animations / AnimationSpeed / TweenTime / Easing affect the whole UI.
+-- With animations off the properties are applied instantly.
+function Library:Tween(Inst, Properties, Time, EasingStyle, EasingDirection)
+    local Style = Library.Style;
+
+    if (not Style.Animations) or Style.AnimationSpeed <= 0 then
+        for Property, Value in next, Properties do
+            Inst[Property] = Value;
+        end;
+
+        return nil;
+    end;
+
+    local Tween = TweenService:Create(
+        Inst,
+        TweenInfo.new((Time or Style.TweenTime) / Style.AnimationSpeed, EasingStyle or Style.EasingStyle, EasingDirection or Style.EasingDirection),
+        Properties
+    );
+
+    Tween:Play();
+    return Tween;
+end;
+
+function Library:SyncStroke(Inst, Stroke)
     local Color = Inst.BorderColor3;
 
     if IsBlack(Color) then
@@ -231,13 +400,111 @@ function Library:SyncStroke(Inst, Stroke, Animate)
         return;
     end;
 
+    -- BorderColor3 is already tweened by Library:Tween / OnHighlight, the stroke just follows it every frame
     Stroke.Enabled = true;
+    Stroke.Color = Color;
+end;
 
-    if Animate and Stroke.Color ~= Color then
-        TweenService:Create(Stroke, TweenInfo.new(0.14, Enum.EasingStyle.Quad), { Color = Color }):Play();
-    else
-        Stroke.Color = Color;
+-- Applies Library.Style to everything that already exists. Called by SetStyle / ResetStyle / ApplyStylePreset.
+function Library:ApplyStyle()
+    local Style = Library.Style;
+
+    for Corner, Kind in next, Library.Corners do
+        if Corner.Parent then
+            local Radius = Style.SmallCorner;
+
+            if Kind == 'Window' then
+                Radius = Style.WindowCorner;
+            elseif Kind == 'WindowInner' then
+                Radius = math.max(Style.WindowCorner - 1, 0);
+            elseif Kind == 'Large' then
+                Radius = Style.ElementCorner;
+            end;
+
+            Corner.CornerRadius = UDim.new(0, Radius);
+        end;
     end;
+
+    for Stroke in next, Library.RimStrokes do
+        Stroke.Thickness = Style.RimThickness;
+    end;
+
+    for Stroke in next, Library.GlowStrokes do
+        Stroke.Thickness = Style.GlowThickness;
+        Stroke.Enabled = Style.GlowEnabled;
+    end;
+
+    -- reset whatever the previous mode left behind, the render loop takes over again from here
+    local Sequence = Library:GetAccentSequence();
+
+    for Gradient in next, Library.AccentGradients do
+        Gradient.Offset = Vector2.zero;
+        Gradient.Rotation = 0;
+        Gradient.Color = Sequence;
+    end;
+
+    if Style.Font and Style.Font ~= Library.Font then
+        Library.Font = Style.Font;
+
+        for _, Desc in next, ScreenGui:GetDescendants() do
+            if Desc:IsA('TextLabel') or Desc:IsA('TextBox') or Desc:IsA('TextButton') then
+                Desc.Font = Style.Font;
+            end;
+        end;
+    end;
+end;
+
+-- Merge only the keys you pass. Unknown keys are reported instead of silently ignored.
+function Library:SetStyle(Values)
+    if type(Values) ~= 'table' then
+        return;
+    end;
+
+    for Key, Value in next, Values do
+        if Library.DefaultStyle[Key] == nil and Key ~= 'GradientColors' then
+            warn('[MikuLib] SetStyle: unknown style key ' .. tostring(Key));
+        else
+            Library.Style[Key] = Value;
+        end;
+    end;
+
+    Library.Style.AnimationSpeed = math.max(tonumber(Library.Style.AnimationSpeed) or 1, 0);
+
+    Library:ApplyStyle();
+end;
+
+function Library:ResetStyle()
+    for Key, Value in next, Library.DefaultStyle do
+        Library.Style[Key] = Value;
+    end;
+
+    Library.Style.GradientColors = nil;
+    Library:ApplyStyle();
+end;
+
+function Library:ApplyStylePreset(Name)
+    local Preset = Library.StylePresets[Name];
+
+    if not Preset then
+        warn('[MikuLib] unknown style preset ' .. tostring(Name));
+        return false;
+    end;
+
+    Library:ResetStyle();
+    Library:SetStyle(Preset);
+    return true;
+end;
+
+-- Sets any of the six theme colours at once and re-skins the UI: Library:SetColors({ AccentColor = Color3.fromRGB(...) })
+function Library:SetColors(Colors)
+    for _, Key in next, { 'FontColor', 'MainColor', 'AccentColor', 'SecondaryColor', 'BackgroundColor', 'OutlineColor', 'RiskColor' } do
+        if typeof(Colors[Key]) == 'Color3' then
+            Library[Key] = Colors[Key];
+        end;
+    end;
+
+    Library.AccentColorDark = Library:GetDarkerColor(Library.AccentColor);
+    Library:UpdateColorsUsingRegistry();
 end;
 
 function Library:SkinInstance(Inst)
@@ -245,7 +512,8 @@ function Library:SkinInstance(Inst)
         local Size = Inst.Size;
         if Inst.Image ~= '' and (Size.X.Scale > 0 or Size.X.Offset >= 12) then
             local Corner = Instance.new('UICorner');
-            Corner.CornerRadius = UDim.new(0, 4);
+            Corner.CornerRadius = UDim.new(0, Library.Style.SmallCorner);
+            Library.Corners[Corner] = 'Small';
             Corner.Parent = Inst;
         end;
         return;
@@ -298,13 +566,15 @@ function Library:SkinInstance(Inst)
         Library:SyncStroke(Inst, Stroke);
 
         Inst:GetPropertyChangedSignal('BorderColor3'):Connect(function()
-            Library:SyncStroke(Inst, Stroke, true);
+            Library:SyncStroke(Inst, Stroke);
         end);
     end;
 
     if not IsLine then
+        local Small = (H ~= nil and H <= 24);
         local Corner = Instance.new('UICorner');
-        Corner.CornerRadius = UDim.new(0, (H ~= nil and H <= 24) and 4 or 6);
+        Corner.CornerRadius = UDim.new(0, Small and Library.Style.SmallCorner or Library.Style.ElementCorner);
+        Library.Corners[Corner] = Small and 'Small' or 'Large';
         Corner.Parent = Inst;
     end;
 end;
@@ -639,8 +909,6 @@ function Library:AddToolTip(InfoStr, HoverInstance)
 end
 
 function Library:OnHighlight(HighlightInstance, Instance, Properties, PropertiesDefault)
-    local HoverTweenInfo = TweenInfo.new(0.16, Enum.EasingStyle.Quint, Enum.EasingDirection.Out);
-
     local function Apply(TargetProperties)
         local Reg = Library.RegistryMap[Instance];
         local TweenProperties = {};
@@ -661,7 +929,7 @@ function Library:OnHighlight(HighlightInstance, Instance, Properties, Properties
         end;
 
         if next(TweenProperties) then
-            TweenService:Create(Instance, HoverTweenInfo, TweenProperties):Play();
+            Library:Tween(Instance, TweenProperties);
         end;
     end;
 
@@ -2419,9 +2687,9 @@ do
         end
 
         function Toggle:Display()
-            TweenService:Create(ToggleInner, TweenInfo.new(0.15, Enum.EasingStyle.Quad), {
+            Library:Tween(ToggleInner, {
                 BackgroundColor3 = Toggle.Value and Library.AccentColor or Library.MainColor;
-            }):Play();
+            }, 0.2);
             ToggleInner.BorderColor3 = Toggle.Value and Library.AccentColorDark or Library.OutlineColor;
 
             Library.RegistryMap[ToggleInner].Properties.BackgroundColor3 = Toggle.Value and 'AccentColor' or 'MainColor';
@@ -2601,9 +2869,9 @@ do
 
             local X = math.ceil(Library:MapValue(Slider.Value, Slider.Min, Slider.Max, 0, Slider.MaxSize));
             Slider.FillX = X;
-            TweenService:Create(Fill, TweenInfo.new(0.09, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
+            Library:Tween(Fill, {
                 Size = UDim2.new(0, X, 1, 0);
-            }):Play();
+            }, 0.12, Enum.EasingStyle.Quad);
 
             HideBorderRight.Visible = false;
         end;
@@ -3024,13 +3292,13 @@ do
         function Dropdown:OpenDropdown()
             ListOuter.Visible = true;
             Library.OpenedFrames[ListOuter] = true;
-            TweenService:Create(DropdownArrow, TweenInfo.new(0.2, Enum.EasingStyle.Quint, Enum.EasingDirection.Out), { Rotation = 180 }):Play();
+            Library:Tween(DropdownArrow, { Rotation = 180 }, 0.25);
         end;
 
         function Dropdown:CloseDropdown()
             ListOuter.Visible = false;
             Library.OpenedFrames[ListOuter] = nil;
-            TweenService:Create(DropdownArrow, TweenInfo.new(0.2, Enum.EasingStyle.Quint, Enum.EasingDirection.Out), { Rotation = 0 }):Play();
+            Library:Tween(DropdownArrow, { Rotation = 0 }, 0.25);
         end;
 
         function Dropdown:OnChanged(Func)
